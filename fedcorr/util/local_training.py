@@ -52,7 +52,7 @@ class LocalUpdate(object):
     def train_test(self, dataset, idxs):
         # split training set, validation set and test set
         train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True, num_workers=4, prefetch_factor=2)
-        test = DataLoader(dataset, batch_size=128, num_workers=4, prefetch_factor=2)
+        test = DataLoader(dataset, batch_size=self.args.local_bs, num_workers=4, prefetch_factor=2)
         return train, test
 
     def update_weights(self, net, seed, w_g, epoch, mu=1, lr=None):
@@ -61,9 +61,9 @@ class LocalUpdate(object):
         net.train()
         # train and update
         if lr is None:
-            optimizer = torch.optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum)
+            optimizer = torch.optim.AdamW(net.parameters(), lr=self.args.lr, weight_decay=self.args.weight_decay)
         else:
-            optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=self.args.momentum)
+            optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=self.args.weight_decay)
 
         epoch_loss = []
         for iter in range(epoch):

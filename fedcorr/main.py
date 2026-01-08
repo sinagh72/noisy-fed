@@ -127,7 +127,6 @@ if __name__ == '__main__':
                 LID_whole[sample_idx] = LID_local
                 loss_whole[sample_idx] = loss
                 LID_client[idx] = np.mean(LID_local)
-                
                 print("Client %d LID: %.4f" % (idx, LID_client[idx]))
             # update global weights
             dict_len = [len(dict_users[idx]) for idx in idxs_users]

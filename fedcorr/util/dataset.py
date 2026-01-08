@@ -76,8 +76,7 @@ def get_dataset(args):
         data_path = '/data/OCT/classification/Kermany'
         args.num_classes = 4
         trans_train = transforms.Compose([
-                    transforms.Resize((256, 256)),
-                    transforms.RandomCrop(224),
+                    transforms.Resize((224, 224)),
                     transforms.RandomHorizontalFlip(),
                     transforms.ToTensor(),
                     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
@@ -182,3 +181,4 @@ class Clothing(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.data)
+

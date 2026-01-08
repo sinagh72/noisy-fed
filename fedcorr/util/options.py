@@ -13,16 +13,17 @@ def args_parser():
     parser.add_argument('--frac1', type=float, default=0.1, help="fration of selected clients in preprocessing stage")
     parser.add_argument('--frac2', type=float, default=0.1, help="fration of selected clients in fine-tuning and usual training stage")
 
-    parser.add_argument('--num_users', type=int, default=10, help="number of uses: K")
-    parser.add_argument('--local_bs', type=int, default=10, help="local batch size: B")
-    parser.add_argument('--lr', type=float, default=0.003, help="learning rate")
+    parser.add_argument('--num_users', type=int, default=5, help="number of uses: K")
+    parser.add_argument('--local_bs', type=int, default=64, help="local batch size: B")
+    parser.add_argument('--lr', type=float, default=1e-3, help="learning rate")
     parser.add_argument('--momentum', type=float, default=0.5, help="SGD momentum, default 0.5")
-    parser.add_argument('--beta', type=float, default=0, help="coefficient for local proximal，0 for fedavg, 1 for fedprox, 5 for noise fl")
+    parser.add_argument('--weight_decay', type=float, default=1e-2, help="weight decay for optimizer")
+    parser.add_argument('--beta', type=float, default=0, help="coefficient for local proximal, 0 for fedavg, 1 for fedprox, 5 for noise fl")
 
     # noise arguments
     parser.add_argument('--LID_k', type=int, default=10, help="lid")
     parser.add_argument('--level_n_system', type=float, default=0.4, help="fraction of noisy clients")
-    parser.add_argument('--level_n_lowerb', type=float, default=0.5, help="lower bound of noise level (flipt the label with prob \in [0.5, 1])")
+    parser.add_argument('--level_n_lowerb', type=float, default=0.85, help="lower bound of noise level (flipt the label with prob \in [0.5, 1])")
 
     # correction
     parser.add_argument('--relabel_ratio', type=float, default=0.5, help="proportion of relabeled samples among selected noisy samples")
@@ -42,8 +43,10 @@ def args_parser():
     parser.add_argument('--non_iid_prob_class', type=float, default=0.7, help="non iid sampling prob for class")
     parser.add_argument('--alpha_dirichlet', type=float, default=10)
     parser.add_argument('--num_classes', type=int, default=4, help="number of classes")
-    parser.add_argument('--seed', type=int, default=13, help="random seed, default: 1")
+    parser.add_argument('--seed', type=int, default=42, help="random seed, default: 42")
     parser.add_argument('--mixup', action='store_true')
     parser.add_argument('--alpha', type=float, default=1, help="0.1,1,5")
+
+    parser.add_argument('--client_score', type=str, default='knn', choices=['knn', 'dispersion', 'lid'], help='client noisiness score method')
 
     return parser.parse_args()
