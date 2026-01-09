@@ -191,7 +191,7 @@ def run_client_pipeline(
         vecs = get_singular_vector(feats, y_noisy_local)
 
     scores = get_score(vecs, feats, y_noisy_local, normalization=True)
-    y_pred_local = fit_mixture(scores, y_noisy_local, p_threshold=0.5)
+    y_pred_local = fit_mixture(scores, y_noisy_local, p_threshold=0.2)
     mask_clean = np.zeros((len(y_noisy_local),), dtype=bool)
     mask_clean[y_pred_local] = True
     
@@ -216,18 +216,42 @@ def run_client_pipeline(
     )
 
     # decide which noisy ones to relabel
-    tau = 0.2
-    to_change = []
+    top_p = 0.3   # e.g., 0.2 ~ 0.4 is usually sane
+    # 1) collect candidates from detected-noisy set
+    cands_by_pred = {c: [] for c in range(num_classes)}  # pred class -> list of (conf, g)
     for g in pred_noisy_global_idx:
         g = int(g)
         if g not in prob_map:
             continue
-        conf = float(np.max(prob_map[g]))
-        if conf >= tau:
-            to_change.append(g)
+
+        probs = prob_map[g]
+        conf = float(np.max(probs))
+        new = int(np.argmax(probs))     # or pred_map[g] (should match)
+        old = int(y_noisy[g])
+
+        # safety: only consider if teacher disagrees with current label
+        if new == old:
+            continue
+
+        cands_by_pred[new].append((conf, g))
+
+    # 2) take top-p within each predicted class
+    to_change = []
+    for c in range(num_classes):
+        cands = cands_by_pred[c]
+        if not cands:
+            continue
+
+        cands.sort(key=lambda t: t[0], reverse=True)
+        k = max(1, int(round(top_p * len(cands))))  # ensure at least 1 if class has any candidates
+        chosen = [g for _, g in cands[:k]]
+        to_change.extend(chosen)
 
     to_change = np.asarray(to_change, dtype=np.int64)
-    print(f"[RELABEL] flagged_noisy={len(pred_noisy_global_idx)} will_change={len(to_change)} (tau={tau})")
+    print(f"[RELABEL-perclass-pred] flagged_noisy={len(pred_noisy_global_idx)} "
+        f"candidates={sum(len(v) for v in cands_by_pred.values())} "
+        f"will_change={len(to_change)} (top_p={top_p})")
+
 
     y_corr = make_corrected_labels_subset(y_noisy, to_change, pred_map)
     cm = correction_metrics(y_clean, y_noisy, y_corr, global_idx=np.array(to_change, dtype=np.int64))
