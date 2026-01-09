@@ -104,36 +104,39 @@ def add_noise(
         print(f"Client {cid}: target={gamma_c[cid]:.4f} real={noise_ratio:.4f}  flipped={len(flipped_global)}/{len(sample_idx)}")
 
     # ----- global plots -----
-    M = label_transition_matrix(y_clean, y_noisy, num_classes)
+    # M = label_transition_matrix(y_clean, y_noisy, num_classes)
 
-    plot_transition_heatmap(
-        M,
-        save_path=f"{save_dir}/label_transition_row_norm_{dataset_name}_{noise_type}.png",
-        normalize="row",
-        title=f"Label transition ({dataset_name}, {noise_type})",
-    )
-    plot_transition_heatmap(
-        M,
-        save_path=f"{save_dir}/label_transition_counts_{dataset_name}_{noise_type}.png",
-        normalize=None,
-        title=f"Label transition counts ({dataset_name}, {noise_type})",
-    )
-    plot_label_distributions(
-        y_before=y_clean,
-        y_after=y_noisy,
-        num_classes=num_classes,
-        save_path=f"{save_dir}/label_distributions_{dataset_name}_{noise_type}.png",
-        title_prefix=f"Global label distribution ({dataset_name}, {noise_type})",
-    )
+    # plot_transition_heatmap(
+    #     M,
+    #     save_path=f"{save_dir}/label_transition_row_norm_{dataset_name}_{noise_type}.png",
+    #     normalize="row",
+    #     title=f"Label transition ({dataset_name}, {noise_type})",
+    # )
+    # plot_transition_heatmap(
+    #     M,
+    #     save_path=f"{save_dir}/label_transition_counts_{dataset_name}_{noise_type}.png",
+    #     normalize=None,
+    #     title=f"Label transition counts ({dataset_name}, {noise_type})",
+    # )
+    # plot_label_distributions(
+    #     y_before=y_clean,
+    #     y_after=y_noisy,
+    #     num_classes=num_classes,
+    #     save_path=f"{save_dir}/label_distributions_{dataset_name}_{noise_type}.png",
+    #     title_prefix=f"Global label distribution ({dataset_name}, {noise_type})",
+    # )
 
     rows = per_class_flip_summary(y_clean, y_noisy, num_classes)
 
-    print("\nPer-class total flips:")
+    print("\nPer-class label noise summary:")
     for r in rows:
         print(
             f"  class {r['class']:2d} | "
-            f"total={r['total']:5d}  "
-            f"flipped={r['flipped']:5d}  "
+            f"before={r['total_before']:5d}  "
+            f"after={r['total_after_flipped']:5d}  "
+            f"flipped_out={r['flipped_out']:5d}  "
+            f"flipped_in={r['flipped_in']:5d}  "
+            f"delta={r['delta']:+5d}  "
             f"kept={r['kept']:5d}  "
             f"flip_rate={r['flip_rate']:.3f}"
         )

@@ -1,4 +1,4 @@
-
+#finesvd_classifier.py
 import torch
 import numpy as np
 import pandas as pd
@@ -28,10 +28,10 @@ def get_singular_vector(features, labels):
     '''
     
     singular_vector_dict = {}
-    with tqdm(total=len(np.unique(labels))) as pbar:
+    with tqdm(total=len(np.unique(labels)), desc="SVD per class") as pbar:
         for index in np.unique(labels):
             _, _, v = np.linalg.svd(features[labels==index])
-            singular_vector_dict[index] = v[0]
+            singular_vector_dict[index] = v[0].astype(np.float32)
             pbar.update(1)
 
     return singular_vector_dict
@@ -120,6 +120,7 @@ def fine(current_features, current_labels, fit='kmeans', prev_features=None, pre
         raise NotImplemented
     
     return clean_labels
+
 
 def extract_cleanidx(teacher, data_loader, parse, print_statistics = True):
     

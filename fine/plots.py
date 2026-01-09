@@ -147,25 +147,219 @@ def plot_label_distributions(
 
 def per_class_flip_summary(y_clean, y_noisy, num_classes):
     """
-    Returns per-class total flips and flip rates.
+    Per-class label corruption summary.
+
+    For each class k:
+      - total_before        : # samples originally in class k
+      - flipped_out         : # samples that left class k due to noise
+      - flipped_in          : # samples that entered class k due to noise
+      - kept                : # samples that stayed in class k
+      - flip_rate           : flipped_out / total_before
+      - total_after_flipped : # samples labeled as class k after noise
+      - delta               : after - before
     """
     y_clean = np.asarray(y_clean).astype(int)
     y_noisy = np.asarray(y_noisy).astype(int)
 
     rows = []
     for k in range(num_classes):
-        mask = (y_clean == k)
-        total = int(mask.sum())
-        flipped = int(np.sum(y_noisy[mask] != y_clean[mask]))
-        kept = total - flipped
-        flip_rate = flipped / total if total > 0 else 0.0
+        mask_before = (y_clean == k)
+        total_before = int(mask_before.sum())
+
+        flipped_out = int(np.sum(y_noisy[mask_before] != y_clean[mask_before]))
+        kept = total_before - flipped_out
+        flip_rate = flipped_out / total_before if total_before > 0 else 0.0
+
+        total_after_flipped = int(np.sum(y_noisy == k))
+        flipped_in = int(np.sum((y_noisy == k) & (y_clean != k)))
+        delta = total_after_flipped - total_before
 
         rows.append({
             "class": k,
-            "total": total,
-            "flipped": flipped,
+            "total_before": total_before,
+            "flipped_out": flipped_out,
+            "flipped_in": flipped_in,
             "kept": kept,
-            "flip_rate": flip_rate,
+            "flip_rate": float(flip_rate),
+            "total_after_flipped": total_after_flipped,
+            "delta": delta,
         })
 
     return rows
+
+
+def clean_id_metrics(clean_mask: np.ndarray, y_noisy: np.ndarray, y_clean: np.ndarray):
+    """
+    CLEAN is the positive class.
+
+    clean_mask: True means predicted CLEAN, False means predicted NOISY
+    true_clean: (y_noisy == y_clean)
+
+    TP: predicted clean AND truly clean
+    FP: predicted clean BUT truly noisy   (this is contamination of the clean set)
+    FN: predicted noisy BUT truly clean   (clean samples discarded)
+    TN: predicted noisy AND truly noisy
+    """
+    true_clean = (y_noisy == y_clean)
+    pred_clean = clean_mask
+
+    tp = np.sum(pred_clean & true_clean)
+    fp = np.sum(pred_clean & (~true_clean))
+    fn = np.sum((~pred_clean) & true_clean)
+    tn = np.sum((~pred_clean) & (~true_clean))
+
+    precision = tp / (tp + fp + 1e-12)   # purity of selected clean
+    recall    = tp / (tp + fn + 1e-12)   # how many true-clean you kept
+    f1        = 2 * precision * recall / (precision + recall + 1e-12)
+    acc       = (tp + tn) / (tp + tn + fp + fn + 1e-12)
+
+    return {
+        "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "accuracy": float(acc),
+    }
+
+
+
+def per_class_clean_stats(clean_mask: np.ndarray, y_noisy: np.ndarray, y_clean: np.ndarray, num_classes: int):
+    """
+    Per-class stats where CLEAN is positive.
+
+    Grouping is done by noisy label (y_noisy == k), same as your current code.
+    """
+    true_clean = (y_noisy == y_clean)
+    pred_clean = clean_mask
+
+    rows = []
+    for k in range(num_classes):
+        m = (y_noisy == k)   # group by current/noisy label
+        Nk = int(m.sum())
+        if Nk == 0:
+            rows.append({
+                "class": k, "N": 0,
+                "TP": 0, "FP": 0, "FN": 0, "TN": 0,
+                "precision": 0.0, "recall": 0.0, "f1": 0.0,
+            })
+            continue
+
+        TP = int(np.sum(m & pred_clean & true_clean))
+        FP = int(np.sum(m & pred_clean & (~true_clean)))   # contamination inside predicted clean
+        FN = int(np.sum(m & (~pred_clean) & true_clean))   # clean discarded
+        TN = int(np.sum(m & (~pred_clean) & (~true_clean)))
+
+        prec = TP / (TP + FP + 1e-12)
+        rec  = TP / (TP + FN + 1e-12)
+        f1   = 2 * prec * rec / (prec + rec + 1e-12)
+
+        rows.append({
+            "class": k, "N": Nk,
+            "TP": TP, "FP": FP, "FN": FN, "TN": TN,
+            "precision": float(prec), "recall": float(rec), "f1": float(f1),
+        })
+
+    return rows
+
+
+
+def print_noise_metrics(title, cm, y_noisy, y_clean, num_classes):
+    print(f"\n{title}")
+
+    overall = clean_id_metrics(cm, y_noisy, y_clean)
+    rows = per_class_clean_stats(cm, y_noisy, y_clean, num_classes)
+
+    print(f"  Acc={overall['accuracy']:.4f} "
+          f"Prec={overall['precision']:.4f} "
+          f"Rec={overall['recall']:.4f} "
+          f"F1={overall['f1']:.4f}")
+    print(f"  TP={overall['tp']} FP={overall['fp']} "
+          f"FN={overall['fn']} TN={overall['tn']}")
+
+    print("  Per-class:")
+    for r in rows:
+        print(
+            f"    cls={r['class']:2d} N={r['N']:5d} "
+            f"TP={r['TP']:4d} FP={r['FP']:4d} "
+            f"FN={r['FN']:4d} TN={r['TN']:4d} | "
+            f"Prec={r['precision']:.3f} "
+            f"Rec={r['recall']:.3f} "
+            f"F1={r['f1']:.3f}"
+        )
+
+
+def correction_metrics(y_clean: np.ndarray, y_noisy: np.ndarray, y_corrected: np.ndarray, global_idx: np.ndarray,):
+    """
+    Summarize how a label-correction step affected the dataset.
+
+    Args:
+      y_clean:     [N] ground-truth clean labels (oracle)
+      y_noisy:     [N] labels after synthetic noise injection (before correction)
+      y_corrected: [N] labels after your correction step
+      global_idx: indices you *flagged* as noisy (i.e., the set you attempted to correct)
+
+    Returns:
+      dict of global noise rate before/after and detailed outcomes on flagged samples.
+    """
+    y_clean = np.asarray(y_clean)
+    y_noisy = np.asarray(y_noisy)
+    y_corrected = np.asarray(y_corrected)
+
+    global_idx = np.asarray(global_idx, dtype=np.int64)
+
+    # mask of samples you flagged for correction
+    flagged_mask = np.zeros_like(y_clean, dtype=bool)
+    flagged_mask[global_idx] = True
+
+    # ground truth: which samples were truly noisy BEFORE correction
+    was_wrong_before = (y_noisy != y_clean)
+    was_correct_before = ~was_wrong_before
+
+    # global noise rates
+    noise_rate_before = float(was_wrong_before.mean())
+    noise_rate_after = float((y_corrected != y_clean).mean())
+
+    # among flagged samples:
+    flagged_truly_noisy = flagged_mask & was_wrong_before   # good flags
+    flagged_truly_clean = flagged_mask & was_correct_before # false positives
+
+    # outcomes for flagged truly-noisy samples
+    fixed_wrong = flagged_truly_noisy & (y_corrected == y_clean)
+    still_wrong = flagged_truly_noisy & (y_corrected != y_clean)
+
+    # outcomes for flagged truly-clean samples
+    harmed_clean = flagged_truly_clean & (y_corrected != y_clean)  # you broke them
+    safe_clean = flagged_truly_clean & (y_corrected == y_clean)    # harmless FP
+
+    # rates (avoid divide-by-zero)
+    n_flagged_truly_noisy = max(int(flagged_truly_noisy.sum()), 1)
+    n_flagged_truly_clean = max(int(flagged_truly_clean.sum()), 1)
+
+    fix_rate = float(fixed_wrong.sum() / n_flagged_truly_noisy)
+    harm_rate = float(harmed_clean.sum() / n_flagged_truly_clean)
+
+    # bookkeeping: how many labels you actually changed inside the flagged set
+    num_flagged = int(flagged_mask.sum())
+    num_changed_within_flagged = int(np.sum(flagged_mask & (y_corrected != y_noisy)))
+
+    return {
+        # global
+        "noise_rate_before": noise_rate_before,
+        "noise_rate_after": noise_rate_after,
+
+        # flagged set size + action
+        "num_flagged": num_flagged,
+        "num_changed_within_flagged": num_changed_within_flagged,
+
+        # flagged truly noisy
+        "flagged_truly_noisy": int(flagged_truly_noisy.sum()),
+        "fixed_wrong": int(fixed_wrong.sum()),
+        "still_wrong": int(still_wrong.sum()),
+        "fix_rate": fix_rate,
+
+        # flagged truly clean (false positives)
+        "flagged_truly_clean": int(flagged_truly_clean.sum()),
+        "harmed_clean": int(harmed_clean.sum()),
+        "safe_clean": int(safe_clean.sum()),
+        "harm_rate": harm_rate,
+    }

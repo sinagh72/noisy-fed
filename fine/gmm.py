@@ -1,5 +1,4 @@
-# Code for Discard Noisy Instance Dynamically
-# With Gaussian Mixture Model
+#gmm.py
 
 import numpy as np
 import scipy.stats as stats
@@ -24,7 +23,7 @@ def fit_mixture(scores, labels, p_threshold=0.5):
         cls_index = indexes[labels==cls]
         feats = scores[labels==cls]
         feats_ = np.ravel(feats).astype(np.float32).reshape(-1, 1)
-        gmm = GMM(n_components=2, covariance_type='full', tol=1e-6, max_iter=100)
+        gmm = GMM(n_components=2, covariance_type='full', tol=1e-6, max_iter=200)
         
         gmm.fit(feats_)
         prob = gmm.predict_proba(feats_)
