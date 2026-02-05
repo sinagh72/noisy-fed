@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, Literal
-
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -12,7 +12,17 @@ from tqdm import tqdm
 import numpy as np
 import torch.nn.functional as F
 
+from loss import SupConLoss, sr_sn_alignment_loss, eigen_value_keep_hinge_loss, proto_pull_push_loss, init_prototypes_once, update_prototypes_ema, eigen_repulsion_loss
+
 LabelMode = Literal["noisy", "clean"]  # which label to use from DualLabelDataset
+
+
+@dataclass
+class LogContext:
+    round: int | None = None
+    client: int | None = None
+    stage: str | None = None     # e.g., "S0-noisy", "S3-corr"
+
 
 @dataclass
 class TrainConfig:
@@ -26,19 +36,46 @@ class TrainConfig:
     num_classes: Optional[int] = None
 
 
-def _select_y(batch, label_mode: str):
+def _select_y(batch, label_mode: str, allowed_idx_set=None, y_override_map=None):
     """
-    batch can be:
-      (x, y)  OR  (x, y_noisy, y_clean, idx)
+    Returns:
+      x, y  (both tensors on the same device as batch)
+    If filtering removes the entire batch, returns (None, None).
     """
     if len(batch) == 2:
         x, y = batch
         return x, y
-    if len(batch) >= 4:
-        x, y_noisy, y_clean, idx = batch[:4]
-        y = y_noisy if label_mode == "noisy" else y_clean
+
+    x, y_noisy, y_clean, idx = batch[:4]
+    y = y_noisy if label_mode == "noisy" else y_clean
+
+    # no filtering / overriding
+    if allowed_idx_set is None and y_override_map is None:
         return x, y
-    raise ValueError(f"Unexpected batch format len={len(batch)}")
+
+    idx_np = idx.detach().cpu().numpy().astype(int)
+
+    # filter by allowed indices
+    if allowed_idx_set is not None:
+        keep = np.array([i in allowed_idx_set for i in idx_np], dtype=bool)
+    else:
+        keep = np.ones_like(idx_np, dtype=bool)
+
+    if not np.any(keep):
+        return None, None
+
+    x = x[keep]
+    y = y[keep]
+    idx_keep = idx_np[keep]
+
+    # override labels
+    if y_override_map is not None:
+        # IMPORTANT: only override indices that exist in the map
+        # (should be true if you built allowed_idx_set/y_override_map consistently)
+        y_new = np.array([y_override_map[int(i)] for i in idx_keep], dtype=np.int64)
+        y = torch.from_numpy(y_new).to(y.device)
+
+    return x, y
 
 
 
@@ -48,26 +85,63 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     grad_clip: float = 0.0,
-    label_mode: str = "noisy",   # <-- NEW
+    label_mode: str = "noisy", 
+    ctx: Optional[LogContext] = None, 
+    w_eig: float = 0.01,
+    num_classes: int = 10,
+    eig_power_iters: int = 5,
+    w_keep: float = 0.001,
+    allowed_idx_set=None,
+    y_override_map=None,
 ) -> Dict[str, float]:
     assert label_mode in ["noisy", "clean"]
     model.train()
+
     ce = nn.CrossEntropyLoss()
 
     loss_meter = 0.0
     acc_meter = 0.0
     n_samples = 0
 
-    pbar = tqdm(loader, desc=f"Train({label_mode})", leave=False)
+    prefix = []
+    if ctx is not None:
+        if ctx.round is not None:  prefix.append(f"R{ctx.round:02d}")
+        if ctx.client is not None: prefix.append(f"C{ctx.client:03d}")
+        if ctx.stage:              prefix.append(str(ctx.stage))
+
+    pdesc = " ".join(prefix) + (": " if prefix else "")
+    pbar = tqdm(loader, desc=f"{pdesc}Train({label_mode})", leave=False)
+
     for batch in pbar:
-        x, y = _select_y(batch, label_mode)
+        x, y = _select_y(batch, label_mode, allowed_idx_set, y_override_map)
+        if x is None:
+            continue
 
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True).long()
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
-        loss = ce(logits, y)
+        logits, feats = model(x, return_feats=True)
+        loss_ce = ce(logits, y)
+
+
+
+        # loss = loss_ce + w_eig * loss_eig + w_keep * loss_keep
+        # loss_align = sr_sn_alignment_loss(
+        #     feats=feats,              # use raw feats; the function normalizes internally
+        #     y=y,
+        #     num_classes=num_classes,
+        #     k_noise=4,                # tune
+        #     w_sr=1.0,
+        #     w_sn=0.5,                 # tune
+        #     w_rep=0.25,               # tune
+        #     sim_thr=0.2,
+        #     min_count=4,
+        # )
+
+        # loss = loss_ce + 0.1 * loss_align 
+        loss = loss_ce
+
         loss.backward()
 
         if grad_clip and grad_clip > 0:
@@ -96,6 +170,10 @@ def train_model(
     device: torch.device,
     cfg: TrainConfig,
     label_mode: str = "noisy",  
+    ctx: Optional[LogContext] = None,
+    num_classes: int = 10,
+    allowed_idx_set=None,
+    y_override_map=None
 ) -> Tuple[nn.Module, Dict[str, float]]:
     assert label_mode in ["noisy", "clean"]
 
@@ -109,15 +187,16 @@ def train_model(
     else:
         raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
 
+    model.train()
+
     best_state = None
     best_metrics = {}
 
     for epoch in range(cfg.epochs):
         t0 = time.time()
 
-        train_stats = train_one_epoch(
-            model=model, loader=train_loader, optimizer=optimizer, device=device,
-            grad_clip=cfg.grad_clip, label_mode=label_mode
+        train_stats = train_one_epoch(model=model, loader=train_loader, optimizer=optimizer, device=device,
+            grad_clip=cfg.grad_clip, label_mode=label_mode, ctx=ctx, allowed_idx_set=allowed_idx_set, y_override_map=y_override_map 
         )
 
         if val_loader is not None:
@@ -129,7 +208,17 @@ def train_model(
             best_metrics = {"epoch": epoch, **train_stats}
 
         dt = time.time() - t0
+        prefix = ""
+        if ctx is not None:
+            parts = []
+            if ctx.round is not None:  parts.append(f"R{ctx.round:02d}")
+            if ctx.client is not None: parts.append(f"C{ctx.client:03d}")
+            if ctx.stage:              parts.append(str(ctx.stage))
+            if parts:
+                prefix = "[" + " ".join(parts) + "] "
+
         print(
+            f"{prefix}"
             f"[E{epoch+1:03d}/{cfg.epochs:03d}] "
             f"train({label_mode}) loss={train_stats['loss']:.4f} acc={train_stats['acc']:.4f} | "
             f"{dt:.1f}s"
@@ -276,33 +365,75 @@ def predict_labels_for_indices(model, dataloader, indices, device, return_probs=
 
 @torch.no_grad()
 def extract_backbone_features(model, loader, device):
-    """
-    Returns:
-      feats:  [N, D] float32 numpy
-      y_noisy:[N] int64 numpy
-      idx:    [N] int64 numpy (global indices)
-      y_clean:[N] int64 numpy
-    Assumes loader yields: x, y_noisy, idx, y_clean
-    """
     model.eval()
-    all_f, all_y, all_idx, all_gt = [], [], [], []
+    by_class = {}
 
-    with tqdm(loader, desc="Extracting features", leave=False) as pbar:
-        for x, y, ygt, idx in pbar:
-            x = x.to(device, non_blocking=True)
+    for x, y_noisy, y_clean, idx in loader:
+        x = x.to(device, non_blocking=True)
 
-            # backbone features
-            z = model.backbone(x)  # [B, D]
-            if isinstance(z, (tuple, list)):
-                z = z[0]
+        z = model.extract_features(x)
+        z = z.detach().cpu().float()
 
-            all_f.append(z.detach().cpu())
-            all_y.append(y.detach().cpu())
-            all_idx.append(idx.detach().cpu())
-            all_gt.append(ygt.detach().cpu())
+        y_noisy = y_noisy.detach().cpu().long()
+        y_clean = y_clean.detach().cpu().long()
+        idx = idx.detach().cpu().long()
 
-    feats = torch.cat(all_f, dim=0).float().numpy()
-    y_noisy = torch.cat(all_y, dim=0).long().numpy()
-    idx = torch.cat(all_idx, dim=0).long().numpy()
-    y_clean = torch.cat(all_gt, dim=0).long().numpy()
-    return feats, y_noisy, idx, y_clean
+        for i in range(z.size(0)):
+            c = int(y_noisy[i].item())
+            if c not in by_class:
+                by_class[c] = {"feats": [], "idx": [], "y_noisy": [], "y_clean": []}
+            by_class[c]["feats"].append(z[i:i+1])
+            by_class[c]["idx"].append(idx[i:i+1])
+            by_class[c]["y_noisy"].append(y_noisy[i:i+1])
+            by_class[c]["y_clean"].append(y_clean[i:i+1])
+
+    for c, rec in by_class.items():
+        by_class[c] = {
+            "feats":   torch.cat(rec["feats"], 0).numpy(),
+            "idx":     torch.cat(rec["idx"], 0).numpy(),
+            "y_noisy": torch.cat(rec["y_noisy"], 0).numpy(),
+            "y_clean": torch.cat(rec["y_clean"], 0).numpy(),
+        }
+    return by_class
+
+
+
+
+def save_model(path, model, cfg_train=None, extra=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "cfg_train": vars(cfg_train) if cfg_train is not None else None,
+        "extra": extra,
+    }
+    torch.save(payload, path)
+    print(f"[OK] Saved clean model to: {path}")
+
+def load_model(path, model, device):
+    ckpt = torch.load(path, map_location=device)
+    # support both "full payload" and raw state_dict
+    state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state, strict=True)
+    model.to(device)
+    model.eval()
+    print(f"[OK] Loaded clean model from: {path}")
+    return model, ckpt
+
+
+
+@torch.no_grad()
+def predict_all(model, loader, device):
+    model.eval()
+    y_true, y_pred = [], []
+    for batch in loader:
+        if len(batch) == 2:
+            x, y = batch
+        else:
+            x, y = batch[0], batch[2]
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True).long()
+        logits = model(x)
+        pred = logits.argmax(dim=1)
+        y_true.append(y.detach().cpu().numpy())
+        y_pred.append(pred.detach().cpu().numpy())
+    return np.concatenate(y_true), np.concatenate(y_pred)

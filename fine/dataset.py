@@ -6,7 +6,7 @@ from torchvision.datasets import ImageFolder
 
 from sampling import iid_sampling, non_iid_dirichlet_sampling
 import torch
-
+from torch.utils.data import Subset
 # ------------------------------------------------------------------
 # Transforms
 # ------------------------------------------------------------------
@@ -22,7 +22,7 @@ def build_transforms(dataset_name: str, split: str):
     if dataset_name in ["cifar10", "cifar100"]:
         if split == "train":
             return transforms.Compose([
-                transforms.RandomCrop(32, padding=4),
+                transforms.Resize((32, 32), interpolation=transforms.InterpolationMode.BICUBIC),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize(
@@ -103,6 +103,21 @@ def get_dataset(dataset_name, num_users, iid, non_iid_prob_class, alpha_dirichle
         dataset_train = datasets.CIFAR10(data_path, train=True, download=True, transform=build_transforms(name, "train"))
         dataset_test = datasets.CIFAR10(data_path, train=False, download=True, transform=build_transforms(name, "test"))
         y_train = np.array(dataset_train.targets)
+
+        # y_train = np.array(dataset_train.targets)
+        # y_test = np.array(dataset_test.targets)
+
+        # # Keep only class 0 and 1
+        # train_idx = np.where((y_train == 0) | (y_train == 1) | (y_train == 2))[0]
+        # test_idx = np.where((y_test == 0) | (y_test == 1) | (y_test == 2))[0]
+
+        # dataset_train = Subset(dataset_train, train_idx)
+        # dataset_test = Subset(dataset_test, test_idx)
+
+        # dataset_train.targets = y_train[train_idx]
+        # dataset_test.targets = y_test[test_idx]
+        # num_classes = 3
+        
 
     elif name == "cifar100":
         data_path = "../data/cifar100"

@@ -6,13 +6,13 @@ from torchvision.models import (
     Swin_V2_B_Weights, Swin_V2_T_Weights, Swin_V2_S_Weights,
     ResNeXt101_64X4D_Weights, ViT_L_32_Weights, ConvNeXt_Large_Weights,
 )
+import torch.nn.functional as F
 
 def build_backbone_model(model, pretrained=True, num_classes=10):
     if model == "resnet18":
         m = torchvision.models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         in_dim = m.fc.in_features
         m.fc = nn.Identity()
-
         backbone = m
 
     elif model == "resnet50":
@@ -61,20 +61,61 @@ def build_backbone_model(model, pretrained=True, num_classes=10):
         in_dim = m.classifier[-1].in_features
         m.classifier = nn.Identity()
         backbone = m
+    
+    elif model == "dinov3_small":
+        m = torch.hub.load(
+            repo_or_dir="./",
+            model="dinov3_vits16",
+            source="local",
+            weights="/data/models/dinov3_vits16_pretrain_lvd1689m-8aa4cbdd.pth",
+        )
+        in_dim = m.embed_dim
+        backbone = m
+
+    elif model == "dinov3_base":
+        m = torch.hub.load(
+            repo_or_dir="./",
+            model="dinov3_vitb16",
+            source="local",
+            weights="/data/models/dinov3_vitb16_pretrain_lvd1689m-8aa4cbdd.pth",
+        )
+        in_dim = m.embed_dim
+        backbone = m
+
+    elif model == "dinov3_large":
+        m = torch.hub.load(
+            repo_or_dir="./",
+            model="dinov3_vitl16",
+            source="local",
+            weights="/data/models/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+        )
+        in_dim = m.embed_dim
+        backbone = m
 
     else:
         raise ValueError(f"Unknown backbone: {model}")
 
     class Model(nn.Module):
-        def __init__(self, backbone, in_dim, num_classes):
+        def __init__(self, backbone, num_classes):
             super().__init__()
             self.backbone = backbone          # returns FEATURES now
             self.head = nn.Linear(in_dim, num_classes)
 
-        def forward(self, x):
+        def forward(self, x, return_feats=False):
             z = self.backbone(x)              # [B, in_dim]
             if isinstance(z, (tuple, list)):
                 z = z[0]
-            return self.head(z)
+            logits = self.head(z)
+            if return_feats:
+                return logits, z
+            return logits
 
-    return Model(backbone, in_dim, num_classes)
+        @torch.no_grad()
+        def extract_features(self, x):
+            """
+            which:
+            - "backbone": returns [B, in_dim]
+            """
+            return self.backbone(x)
+    
+    return Model(backbone, num_classes)
