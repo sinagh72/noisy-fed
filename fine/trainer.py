@@ -12,7 +12,7 @@ from tqdm import tqdm
 import numpy as np
 import torch.nn.functional as F
 
-from loss import SupConLoss, sr_sn_alignment_loss, eigen_value_keep_hinge_loss, proto_pull_push_loss, init_prototypes_once, update_prototypes_ema, eigen_repulsion_loss
+from loss import SupConLoss, sr_sn_alignment_loss
 
 LabelMode = Literal["noisy", "clean"]  # which label to use from DualLabelDataset
 
@@ -98,7 +98,7 @@ def train_one_epoch(
     model.train()
 
     ce = nn.CrossEntropyLoss()
-
+    sup_con = SupConLoss()
     loss_meter = 0.0
     acc_meter = 0.0
     n_samples = 0
@@ -124,22 +124,18 @@ def train_one_epoch(
         logits, feats = model(x, return_feats=True)
         loss_ce = ce(logits, y)
 
-
-
-        # loss = loss_ce + w_eig * loss_eig + w_keep * loss_keep
         # loss_align = sr_sn_alignment_loss(
         #     feats=feats,              # use raw feats; the function normalizes internally
         #     y=y,
         #     num_classes=num_classes,
-        #     k_noise=4,                # tune
         #     w_sr=1.0,
-        #     w_sn=0.5,                 # tune
+        #     w_sn=0.2,                 # tune
         #     w_rep=0.25,               # tune
         #     sim_thr=0.2,
         #     min_count=4,
         # )
-
-        # loss = loss_ce + 0.1 * loss_align 
+        # loss = loss_ce + sup_con(feats, y)
+        # loss = loss_ce + 0.5 * loss_align 
         loss = loss_ce
 
         loss.backward()
@@ -372,6 +368,7 @@ def extract_backbone_features(model, loader, device):
         x = x.to(device, non_blocking=True)
 
         z = model.extract_features(x)
+        # z = F.normalize(z, dim=1, eps=1e-8) 
         z = z.detach().cpu().float()
 
         y_noisy = y_noisy.detach().cpu().long()
@@ -397,6 +394,78 @@ def extract_backbone_features(model, loader, device):
     return by_class
 
 
+@torch.no_grad()
+def extract_client_stats(model, loader, device, use_label="noisy"):
+    """
+    Returns:
+      by_class_unit: dict[class] -> feats_unit [Nc,D] (for SVD/sim)
+      stats: dict with global symmetric-noise indicators
+    """
+    model.eval()
+
+    by_class_unit = {}
+    norms_all = []
+    margin_all = []
+    entropy_all = []
+    conf_all = []
+
+    for x, y_noisy, y_clean, idx in loader:
+        x = x.to(device, non_blocking=True)
+        y = y_noisy if use_label == "noisy" else y_clean
+        y = y.to(device)
+
+        # get BOTH logits and raw feats
+        logits, z_raw = model(x, return_feats=True)     # z_raw: [B,D]
+        z_unit = F.normalize(z_raw, dim=1, eps=1e-8)
+
+        # ----- symmetric indicators (client-level) -----
+        z_raw_cpu = z_raw.detach().cpu()
+        norms_all.append(torch.norm(z_raw_cpu, dim=1))
+
+        probs = torch.softmax(logits, dim=1).detach().cpu()
+        conf, _ = probs.max(dim=1)
+        conf_all.append(conf)
+
+        # entropy
+        ent = -(probs * torch.log(probs + 1e-12)).sum(dim=1)
+        entropy_all.append(ent)
+
+        # margin: top1 - top2
+        top2 = torch.topk(logits.detach().cpu(), k=2, dim=1).values
+        margin = top2[:, 0] - top2[:, 1]
+        margin_all.append(margin)
+
+        # ----- store per-class UNIT features -----
+        y_cpu = y.detach().cpu().long()
+        z_unit_cpu = z_unit.detach().cpu().float()
+
+        for i in range(z_unit_cpu.size(0)):
+            c = int(y_cpu[i].item())
+            if c not in by_class_unit:
+                by_class_unit[c] = {"feats": []}
+            by_class_unit[c]["feats"].append(z_unit_cpu[i:i+1])
+
+    # finalize by_class_unit to numpy
+    for c, rec in by_class_unit.items():
+        by_class_unit[c] = {"feats": torch.cat(rec["feats"], 0).numpy()}
+
+    # finalize stats
+    norms_all   = torch.cat(norms_all).numpy()   if norms_all   else np.array([])
+    margin_all  = torch.cat(margin_all).numpy()  if margin_all  else np.array([])
+    entropy_all = torch.cat(entropy_all).numpy() if entropy_all else np.array([])
+    conf_all    = torch.cat(conf_all).numpy()    if conf_all    else np.array([])
+
+    stats = {
+        "feat_norm_mean": float(norms_all.mean())   if norms_all.size else 0.0,
+        "feat_norm_std":  float(norms_all.std())    if norms_all.size else 0.0,
+        "margin_mean":    float(margin_all.mean())  if margin_all.size else 0.0,
+        "margin_std":     float(margin_all.std())   if margin_all.size else 0.0,
+        "entropy_mean":   float(entropy_all.mean()) if entropy_all.size else 0.0,
+        "entropy_std":    float(entropy_all.std())  if entropy_all.size else 0.0,
+        "conf_mean":      float(conf_all.mean())    if conf_all.size else 0.0,
+        "conf_std":       float(conf_all.std())     if conf_all.size else 0.0,
+    }
+    return by_class_unit, stats
 
 
 def save_model(path, model, cfg_train=None, extra=None):

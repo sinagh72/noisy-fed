@@ -12,8 +12,8 @@ class ExpConfig:
     num_users: int = 10
 
     # noise
-    level_n_system: float = 1.0
-    level_n: float = 0.4
+    level_n_system: float = 0.8
+    noise_p: float = 0.3
     noise_type: str = "asym"
     save_dir: str = "./results"
 
@@ -22,19 +22,15 @@ class ExpConfig:
     pretrained: bool = True
     batch_size: int = 64
 
-    # identification
-    id_mode: str = "gmm"    # "gmm" or "zeta"
-    zeta: float = 0.2
-
     # relabel
+    fed_strategy: str = "fedeig"
     strategy: str = "B"     # "A" "B" "C"
     tau: float = 0.95
-
 
     strict_keep_frac: float = 0.30
     strict_min_per_class: int = 10
 
-    epochs: int = 10
+    epochs: int = 5
     lr: float = 3e-4
-    weight_decay: float = 1e-2
+    weight_decay: float = 1e-3
     optimizer: str = "AdamW"
