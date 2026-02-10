@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from relabel import choose_k_by_ratio
 
 class SupConLoss(nn.Module):
     """
@@ -40,267 +41,110 @@ class SupConLoss(nn.Module):
         return feats.new_tensor(0.0)
 
 
-
-def proto_pull_push_loss(
-    feats: torch.Tensor,
-    y: torch.Tensor,
-    prototypes: torch.Tensor,
-    margin: float = 0.2,
-    use_cosine: bool = True,
-) -> torch.Tensor:
-    """
-    Pull to own prototype + push away from closest wrong prototype by margin.
-    If use_cosine=True, operates on cosine distance in normalized space.
-    """
-    if use_cosine:
-        feats_n = F.normalize(feats, dim=1)
-        prot_n  = F.normalize(prototypes, dim=1)
-        sims = feats_n @ prot_n.t()             # [B, K], higher=closer
-        pos = sims.gather(1, y.view(-1, 1)).squeeze(1)   # [B]
-
-        # mask out the true class, then take max (closest wrong)
-        B, K = sims.shape
-        mask = torch.ones_like(sims, dtype=torch.bool)
-        mask.scatter_(1, y.view(-1, 1), False)
-        neg = sims.masked_fill(~mask, -1e9).max(dim=1).values
-
-        # want pos >= neg + margin  ->  max(0, margin + neg - pos)
-        push = F.relu(margin + neg - pos).mean()
-        pull = (1.0 - pos).mean()               # encourages pos -> 1
-        return pull + push
-
-    else:
-        # L2 version
-        B = feats.size(0)
-        p_pos = prototypes[y]                   # [B,D]
-        pull = F.mse_loss(feats, p_pos)
-
-        dists = torch.cdist(feats, prototypes)  # [B,K]
-        d_pos = dists.gather(1, y.view(-1, 1)).squeeze(1)
-
-        # closest wrong prototype
-        mask = torch.ones_like(dists, dtype=torch.bool)
-        mask.scatter_(1, y.view(-1, 1), False)
-        d_neg = dists.masked_fill(~mask, 1e9).min(dim=1).values
-
-        # want d_neg >= d_pos + margin  -> max(0, margin + d_pos - d_neg)
-        push = F.relu(margin + d_pos - d_neg).mean()
-        return pull + push
-
-
 @torch.no_grad()
-def update_prototypes_ema(
-    prototypes: torch.Tensor,   # [K,D]
-    feats: torch.Tensor,        # [B,D]
-    y: torch.Tensor,            # [B]
-    momentum: float = 0.9,
-):
-    K, D = prototypes.shape
-    for c in y.unique():
-        c = int(c.item())
-        mask = (y == c)
-        if mask.any():
-            mu = feats[mask].mean(dim=0)
-            prototypes[c].mul_(momentum).add_(mu * (1.0 - momentum))
-
-@torch.no_grad()
-def init_prototypes_once(prototypes, proto_inited, feats, y):
-    for c in y.unique():
-        c = int(c.item())
-        if not proto_inited[c]:
-            prototypes[c] = feats[y == c].mean(dim=0)
-            proto_inited[c] = True
-
-
-
-
-def top_eigvec_power(Xc: torch.Tensor, n_iter: int = 5, eps: float = 1e-6):
-    """
-    Xc: [n, D] centered features for one class
-    Returns: v [D] approx top eigenvector of (Xc^T Xc)
-    """
-    n, D = Xc.shape
-    # random init (deterministic init also OK)
-    v = F.normalize(torch.randn(D, device=Xc.device, dtype=Xc.dtype), dim=0)
-
-    for _ in range(n_iter):
-        # w = (X^T X) v  but compute without forming X^T X:
-        # t = X v -> [n]
-        t = Xc @ v                       # [n]
-        w = Xc.t() @ t                   # [D]
-        v = F.normalize(w, dim=0, eps=eps)
-
-    return v
-
-
-def eigen_repulsion_loss(
-    feats: torch.Tensor,    # [B, D]
-    y: torch.Tensor,        # [B]
-    num_classes: int,
-    n_iter: int = 5,
-    min_count: int = 4,     # need enough samples to estimate covariance direction
-):
-    """
-    Penalize similarity between top eigenvectors of each class covariance.
-    Returns scalar loss.
-    """
-    vs = []
-    for c in range(num_classes):
-        mask = (y == c)
-        if mask.sum().item() < min_count:
-            continue
-        Xc = feats[mask]                    # [n_c, D]
-        Xc = Xc - Xc.mean(dim=0, keepdim=True)
-        v = top_eigvec_power(Xc, n_iter=n_iter)
-        vs.append(v)
-
-    if len(vs) < 2:
-        return feats.new_tensor(0.0)
-
-    V = torch.stack(vs, dim=0)              # [K', D]
-    G = V @ V.t()                           # [K', K']  (cosine-ish since v normalized)
-    off = G - torch.eye(G.size(0), device=G.device, dtype=G.dtype)
-    return (off**2).mean()                  # average squared off-diagonal similarity
-
-
-def eigen_value_keep_hinge_loss(
-    feats: torch.Tensor,
-    y: torch.Tensor,
-    num_classes: int,
-    lam_min: float = 0.05,
-    n_iter: int = 5,
-    min_count: int = 4,
-):
-    losses = []
-    for c in range(num_classes):
-        mask = (y == c)
-        if mask.sum().item() < min_count:
-            continue
-        Xc = feats[mask]
-        Xc = Xc - Xc.mean(dim=0, keepdim=True)
-
-        v = top_eigvec_power(Xc, n_iter=n_iter)
-        lam = (Xc @ v).pow(2).mean()
-
-        # penalize only if variance is too small
-        losses.append(F.relu(lam_min - lam))
-
-    if not losses:
-        return feats.new_tensor(0.0)
-    return torch.stack(losses).mean()
-
-
-
-import torch
-import torch.nn.functional as F
-
-@torch.no_grad()
-def _class_pca_basis(Xc: torch.Tensor, k_noise: int = 4, eps: float = 1e-6):
-    """
-    Xc: [n_c, D] features for one class (NOT normalized required, we center inside)
-    Returns:
-      v_r: [D] top right singular vector
-      Vn:  [m, D] noise basis (next components), m = min(k_noise, D-1, n_c-1)
-    """
-    n, D = Xc.shape
+def _class_pca_basis(Xc: torch.Tensor, eps: float = 1e-6):
     X = Xc - Xc.mean(dim=0, keepdim=True)
+    _, S, Vh = torch.linalg.svd(Xc, full_matrices=False)
+    k = choose_k_by_ratio(S.detach().cpu().numpy(), c=10)
 
-    # SVD: X = U S Vh, Vh: [D, D] (or [r, D]) depending on full_matrices
-    # Using full_matrices=False gives Vh: [r, D] where r=min(n,D)
-    U, S, Vh = torch.linalg.svd(X, full_matrices=False)
+    v_r = Vh[:k]  # [D]
 
-    v_r = Vh[0]  # [D]
-
-    # pick next components as "noise subspace"
-    max_m = min(k_noise, Vh.size(0) - 1)  # can't exceed available comps minus top
-    if max_m <= 0:
-        Vn = X.new_zeros((0, D))
-    else:
-        Vn = Vh[1:1+max_m]  # [m, D]
-
-    v_r = F.normalize(v_r, dim=0, eps=eps)
-    Vn = F.normalize(Vn, dim=1, eps=eps) if Vn.numel() > 0 else Vn
-    return v_r, Vn
+    v_n = Vh[k:]
+    v_r = F.normalize(v_r, dim=1, eps=eps)
+    v_n = F.normalize(v_n, dim=1, eps=eps) 
+    return v_r, v_n
 
 
 def sr_sn_alignment_loss(
-    feats: torch.Tensor,      # [B, D]
-    y: torch.Tensor,          # [B]
+    feats: torch.Tensor,
+    y: torch.Tensor,
     num_classes: int,
-    k_noise: int = 4,
     w_sr: float = 1.0,
     w_sn: float = 1.0,
-    w_rep: float = 0.25,      # repulsion to similar classes' v_r
-    sim_thr: float = 0.2,     # only repel if class directions are similar
+    w_rep: float = 0.25,
+    sim_thr: float = 0.2,
     min_count: int = 4,
-    eps: float = 1e-6,
+    eps: float = 1e-8,
 ):
-    """
-    Returns: scalar loss.
-    """
     feats_n = F.normalize(feats, dim=1, eps=eps)
 
-    # build v_r and Vn for classes present in the batch
     present = []
-    vR = {}
-    vN = {}
-    for c in range(num_classes):
+    vR, vN = {}, {}
+
+    for c_t in torch.unique(y):
+        c = int(c_t.item())
         mask = (y == c)
         if mask.sum().item() < min_count:
             continue
-        v_r_c, Vn_c = _class_pca_basis(feats_n[mask], k_noise=k_noise, eps=eps)
+        Vr, Vn = _class_pca_basis(feats_n[mask], eps=eps)
         present.append(c)
-        vR[c] = v_r_c
-        vN[c] = Vn_c
+        vR[c], vN[c] = Vr, Vn
 
     if len(present) == 0:
         return feats.new_tensor(0.0)
 
-    # --- SR pull + SN suppress (per-sample) ---
-    sr_losses = []
-    sn_losses = []
-
+    # --- SR + SN ---
+    sr_losses, sn_losses = [], []
     for c in present:
-        mask = (y == c)
-        fc = feats_n[mask]  # [n_c, D]
+        fc = feats_n[y == c]  # [n_c, D]
 
-        # s_r = |<f, v_r>|
-        sr = torch.abs(fc @ vR[c])  # [n_c]
-        sr_losses.append((1.0 - sr).mean())
+        Vr = vR[c]            # [k_c, D]
+        proj_r = fc @ Vr.t()                        # [n_c, k_c]
+        sr_energy = (proj_r ** 2).sum(dim=1)        # [n_c] in [0,1]
+        sr_losses.append((1.0 - sr_energy).mean())
 
-        # s_n = || f @ Vn^T ||_2  (we penalize squared energy)
-        Vn_c = vN[c]  # [m, D]
-        if Vn_c.numel() > 0:
-            proj = fc @ Vn_c.t()             # [n_c, m]
-            sn_losses.append((proj.pow(2).sum(dim=1)).mean())
+        Vn = vN[c]
+        if Vn.numel() > 0:
+            proj_n = fc @ Vn.t()
+            sn_losses.append((proj_n ** 2).sum(dim=1).mean())
         else:
             sn_losses.append(fc.new_tensor(0.0))
 
     loss_sr = torch.stack(sr_losses).mean()
     loss_sn = torch.stack(sn_losses).mean()
 
-    # --- repel similar classes (optional, helps when classes are close) ---
+    # --- subspace-overlap repulsion ---
     loss_rep = feats.new_tensor(0.0)
     if w_rep > 0 and len(present) >= 2:
-        V = torch.stack([vR[c] for c in present], dim=0)  # [K', D]
-        S = V @ V.t()                                     # [K', K']
-        # weights for similar pairs (off-diagonal)
-        W = torch.relu(S - sim_thr)
-        W.fill_diagonal_(0.0)
+        overlap = {}
+        for i in present:
+            for j in present:
+                if i == j:
+                    continue
+                Vi, Vj = vR[i], vR[j]     # [k_i,D], [k_j,D]
+                kij = min(Vi.size(0), Vj.size(0))
+                A = Vi @ Vj.t()           # [k_i,k_j]
+                sij = (A.pow(2).sum() / (kij + eps))  # in [0,1]
+                overlap[(i, j)] = sij
 
-        # for each class c, penalize alignment of its samples with other classes' v_r weighted by similarity
         rep_terms = []
-        for i, c in enumerate(present):
-            mask = (y == c)
-            fc = feats_n[mask]                            # [n_c, D]
-            # alignment to all present class directions
-            align = torch.abs(fc @ V.t())                 # [n_c, K']
-            # exclude own column i
-            align_other = align.clone()
-            align_other[:, i] = 0.0
-            # weight by similarity W[i, :]
-            rep = (align_other * W[i].unsqueeze(0)).mean()
-            rep_terms.append(rep)
-        loss_rep = torch.stack(rep_terms).mean()
+        for i in present:
+            fi = feats_n[y == i]          # [n_i,D]
+            if fi.numel() == 0:
+                continue
+
+            weights, energies = [], []
+            for j in present:
+                if j == i:
+                    continue
+                sij = overlap[(i, j)]
+                wij = F.relu(sij - sim_thr)
+                if float(wij.item()) <= 0.0:
+                    continue
+
+                Vj = vR[j]                           # [k_j,D]
+                proj_ij = fi @ Vj.t()                # [n_i,k_j]
+                e_ij = (proj_ij ** 2).sum(dim=1).mean()
+                weights.append(wij)
+                energies.append(e_ij)
+
+            if len(weights) == 0:
+                rep_terms.append(fi.new_tensor(0.0))
+            else:
+                W = torch.stack(weights)
+                E = torch.stack(energies)
+                rep_terms.append((W * E).sum() / (W.sum() + eps))
+
+        loss_rep = torch.stack(rep_terms).mean() if len(rep_terms) else feats.new_tensor(0.0)
 
     return w_sr * loss_sr + w_sn * loss_sn + w_rep * loss_rep
