@@ -78,6 +78,8 @@ def save_metrics_report_txt(path, title, metrics_dict, num_classes, class_names=
         f.write(f"Overall acc:  {metrics_dict['acc']:.6f}\n")
         f.write(f"Macro  F1:    {metrics_dict['macro']['f1']:.6f}\n")
         f.write(f"Micro  F1:    {metrics_dict['micro']['f1']:.6f}\n")
+        if "loss" in metrics_dict:
+            f.write(f"Loss:         {metrics_dict['loss']:.6f}\n")
         f.write("\nPer-class:\n")
         f.write("class\tname\tprecision\trecall\tf1\tsupport\tTP\tFP\tFN\tTN\n")
 
