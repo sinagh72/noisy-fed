@@ -12,8 +12,8 @@ class ExpConfig:
     num_users: int = 10
 
     # noise
-    level_n_system: float = 0.8
-    noise_p: float = 0.3
+    level_n_system: float = 0.5
+    noise_p: float = 0.7
     noise_type: str = "asym"
     save_dir: str = "./results"
 
@@ -21,16 +21,20 @@ class ExpConfig:
     model_name: str = "resnet18"
     pretrained: bool = True
     batch_size: int = 64
+    
+    # FL
+    fl_strategy: str = "fedeig"
+    rounds: int = 100
 
     # relabel
-    fed_strategy: str = "fedeig"
-    strategy: str = "B"     # "A" "B" "C"
+    identification_epochs: int = 5
     tau: float = 0.95
+
 
     strict_keep_frac: float = 0.30
     strict_min_per_class: int = 10
 
-    epochs: int = 5
-    lr: float = 3e-4
-    weight_decay: float = 1e-3
+    epochs: int = 1
+    lr: float = 5e-5
+    weight_decay: float = 1e-2
     optimizer: str = "AdamW"

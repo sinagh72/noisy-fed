@@ -1,5 +1,5 @@
 # run.py
-import copy
+import copy, os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -49,11 +49,9 @@ def build_client_loaders(cfg, noisy_dataset, y_noisy, y_clean, dict_users):
     return train_loaders_train, train_loaders_plain
 
 
-def run_n_clients(cfg, dataset_train, dataset_test, dict_users, num_classes, forced_gamma_s=None):
+def run_fl(cfg, dataset_train, dataset_test, dict_users, num_classes, forced_gamma_s=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
-
-    save_dir = f"{cfg.save_dir}/{cfg.strategy}/{cfg.noise_type}/{cfg.noise_p}"
 
     y_clean = np.array(dataset_train.targets, dtype=np.int64)
     test_loader = build_loader(dataset_test, batch_size=cfg.batch_size, shuffle=False, num_workers=4, seed=cfg.seed)
@@ -71,6 +69,10 @@ def run_n_clients(cfg, dataset_train, dataset_test, dict_users, num_classes, for
     )
     y_noisy = np.asarray(y_noisy, dtype=np.int64)
 
+    save_dir = f"{cfg.save_dir}/{cfg.noise_type}/{gamma_s.tolist().count(0)} clean/{cfg.noise_p}/{cfg.fl_strategy}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
     print("\n=== Client noise summary ===")
     for cid in range(cfg.num_users):
         print(f"Client {cid}: gamma_s={int(gamma_s[cid])} real_noise={real_noise_level[cid]:.4f} n={len(dict_users.get(cid, []))}")
@@ -87,15 +89,21 @@ def run_n_clients(cfg, dataset_train, dataset_test, dict_users, num_classes, for
                             lr=getattr(cfg, "lr", 3e-4),
                             weight_decay=getattr(cfg, "weight_decay", 1e-2),
                             optimizer=getattr(cfg, "optimizer", "AdamW"))
+
+    cfg_identification = TrainConfig(epochs=getattr(cfg, "identification_epochs", 10),
+                            lr=getattr(cfg, "lr", 3e-4),
+                            weight_decay=getattr(cfg, "weight_decay", 1e-2),
+                            optimizer=getattr(cfg, "optimizer", "AdamW"))
     
-    if cfg.strategy == "fedavg":
-        run_fedavg(cfg=cfg, num_classes=num_classes, base_state=base_state, train_loaders_train=train_loaders_train, test_loader=test_loader,
+    if cfg.fl_strategy == "fedavg":
+        run_fedavg(cfg=cfg, gamma_s=gamma_s, num_classes=num_classes, base_state=base_state, train_loaders_train=train_loaders_train, test_loader=test_loader,
                    cfg_train=cfg_train, save_dir=save_dir, device=device)
 
-    if cfg.strategy == "fedprox": #TODO: implement FedProx
-        run_fedavg(cfg=cfg, num_classes=num_classes, base_state=base_state, train_loaders_train=train_loaders_train, test_loader=test_loader,
+    elif cfg.fl_strategy == "fedprox": #TODO: implement FedProx
+        run_fedavg(cfg=cfg, gamma_s=gamma_s, num_classes=num_classes, base_state=base_state, train_loaders_train=train_loaders_train, test_loader=test_loader,
             cfg_train=cfg_train, save_dir=save_dir, device=device)
     
     else:
         run_eig_strategy(cfg=cfg, gamma_s=gamma_s, num_classes=num_classes, base_state=base_state, train_loaders_train=train_loaders_train,
-                          test_loader=test_loader, train_loaders_plain=train_loaders_plain, cfg_train=cfg_train, save_dir=save_dir, device=device)
+                          test_loader=test_loader, train_loaders_plain=train_loaders_plain, cfg_train=cfg_train, 
+                          cfg_identification=cfg_identification, save_dir=save_dir, device=device)

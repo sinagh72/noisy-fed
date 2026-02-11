@@ -494,6 +494,8 @@ def load_model(path, model, device):
 def predict_all(model, loader, device):
     model.eval()
     y_true, y_pred = [], []
+    ce_sum = 0
+    n_samples = 0
     for batch in loader:
         if len(batch) == 2:
             x, y = batch
@@ -502,7 +504,12 @@ def predict_all(model, loader, device):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True).long()
         logits = model(x)
+        loss = F.cross_entropy(logits, y, reduction="mean")
+        bs = y.size(0)
+        ce_sum += loss.item() * bs
+        n_samples += bs
         pred = logits.argmax(dim=1)
         y_true.append(y.detach().cpu().numpy())
         y_pred.append(pred.detach().cpu().numpy())
-    return np.concatenate(y_true), np.concatenate(y_pred)
+    avg_loss = ce_sum / n_samples
+    return np.concatenate(y_true), np.concatenate(y_pred), avg_loss

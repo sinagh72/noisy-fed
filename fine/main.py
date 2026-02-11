@@ -6,6 +6,7 @@ from fl import  run_n_clients
 import math
 import itertools
 import random
+from run import run_fl
 
 def iter_noisy_sets_unique(
     num_clients: int,
@@ -13,6 +14,7 @@ def iter_noisy_sets_unique(
     *,
     cases_to_run: int,
     rng: random.Random,
+    seen_global: set, 
 ):
     total = math.comb(num_clients, k_noisy)
     emitted = 0
@@ -20,9 +22,10 @@ def iter_noisy_sets_unique(
     # Case 1: enumerate all
     if total <= cases_to_run:
         for combo in itertools.combinations(range(num_clients), k_noisy):
-            key = (k_noisy, combo)
-            yield set(combo)
-            emitted += 1
+            key = (k_noisy, combo)   # k_noisy included to avoid collisions across k
+            if key in seen_global:
+                continue
+            seen_global.add(key)
         return
 
     # Case 2: sample
@@ -30,7 +33,11 @@ def iter_noisy_sets_unique(
     while emitted < cases_to_run and attempts < cases_to_run * 200:
         combo = tuple(sorted(rng.sample(range(num_clients), k_noisy)))
         key = (k_noisy, combo)
-        yield set(combo)
+        if key in seen_global:
+            attempts += 1
+            continue
+
+        seen_global.add(key)
         emitted += 1
         attempts += 1
 
@@ -46,7 +53,8 @@ def sweep_all_cases(
     max_cases_per_percent=200,
 ):
     N = cfg.num_users
-    seen_global = set()   # <-- GLOBAL uniqueness
+    rng = random.Random(cfg.seed)
+    seen_global = set()
 
     for p in clean_client_percentage:
         k = int(round(p * N))
@@ -55,13 +63,13 @@ def sweep_all_cases(
         total = math.comb(N, k)
         cases_to_run = min(total, max_cases_per_percent)
 
-        rng = random.Random(cfg.seed)
 
         for noisy_set in iter_noisy_sets_unique(
             N,
             k,
             cases_to_run=cases_to_run,
             rng=rng,
+            seen_global=seen_global,
         ):
             forced_gamma_s = [1] * N
             for idx in noisy_set:
@@ -88,15 +96,15 @@ if __name__ == "__main__":
         alpha_dirichlet=cfg.alpha_dirichlet,
         seed=cfg.seed,
     )
-    sweep_all_cases(
-        cfg=cfg,
-        dataset_train=dataset_train,
-        dataset_test=dataset_test,
-        dict_users=dict_users,
-        num_classes=num_classes,
-        max_cases_per_percent=200,
-        clean_client_percentage=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
-    )
+    # sweep_all_cases(
+    #     cfg=cfg,
+    #     dataset_train=dataset_train,
+    #     dataset_test=dataset_test,
+    #     dict_users=dict_users,
+    #     num_classes=num_classes,
+    #     max_cases_per_percent=200,
+    #     clean_client_percentage=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+    # )
 
     # run_n_clients(
     #             cfg=cfg,
@@ -104,8 +112,14 @@ if __name__ == "__main__":
     #             dataset_test=dataset_test,
     #             dict_users=dict_users,
     #             num_classes=num_classes,
-    #             forced_gamma_s=[1, 1, 1, 1, 1, 1, 1, 0, 1, 0],
+    #             forced_gamma_s=[1, 0, 1, 1, 1, 1, 1, 1, 1, 0],
     #             )
 
-
+    run_fl(cfg=cfg,
+           dataset_train=dataset_train,
+           dataset_test=dataset_test,
+           dict_users=dict_users,
+           num_classes=num_classes,
+        #    forced_gamma_s=[1, 1, 1, 0, 1, 1, 0, 1, 1, 1]
+           )
 
