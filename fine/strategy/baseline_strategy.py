@@ -59,11 +59,10 @@ def run_fedavg(cfg, gamma_s, num_classes, base_state, train_loaders_train, test_
                 net, _ = train_model(
                     net,
                     train_loaders_train[cid],
-                    None,
                     device,
                     cfg_train,
+                    cfg,
                     label_mode="noisy",
-                    num_classes=num_classes,
                 )
 
                 local_states.append(state_dict_to_cpu(net.state_dict()))
